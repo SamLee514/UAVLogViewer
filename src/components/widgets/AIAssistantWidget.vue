@@ -22,7 +22,37 @@
                             <div class="message-content">
                                 <strong v-if="message.type === 'user'">You:</strong>
                                 <strong v-else>AI:</strong>
-                                {{ message.content }}
+
+                                                                <!-- AI Response with Thinking Section -->
+                                <div v-if="message.type === 'ai' && message.thinking" class="ai-response">
+                                    <!-- Debug info -->
+                                    <div style="font-size: 10px; color: #999; margin-bottom: 5px;">
+                                        DEBUG: Has thinking: {{ !!message.thinking }},
+                                        Length: {{ message.thinking ? message.thinking.length : 0 }}
+                                    </div>
+
+                                    <!-- Final Answer (always visible) -->
+                                    <div class="final-answer">
+                                        {{ message.finalAnswer || message.content }}
+                                    </div>
+
+                                    <!-- Collapsible Thinking Section -->
+                                    <div class="thinking-section">
+                                        <button @click="toggleThinking(index)" class="thinking-toggle">
+                                            <i :class="message.showThinking ?
+                                                'fa fa-chevron-up' :
+                                                'fa fa-chevron-down'">
+                                            </i>
+                                            {{ message.showThinking ? 'Hide' : 'Show' }} Thinking
+                                        </button>
+                                        <div v-if="message.showThinking" class="thinking-content">
+                                            {{ message.thinking }}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Regular content for non-AI messages or AI messages without thinking -->
+                                <span v-else>{{ message.content }}</span>
                             </div>
                             <div class="message-time">{{ message.timestamp }}</div>
                         </div>
@@ -162,7 +192,7 @@ export default {
                 })
 
                 const data = await response.json()
-                this.addMessage(data.response, 'ai')
+                this.addMessage(data.response, 'ai', data.thinking, data.response)
             } catch (error) {
                 this.addMessage(`Error: ${error.message}`, 'ai')
             } finally {
@@ -170,12 +200,23 @@ export default {
             }
         },
 
-        addMessage (content, type) {
-            this.state.aiAssistantMessages.push({
+        addMessage (content, type, thinking = null, finalAnswer = null) {
+            const message = {
                 content,
                 type,
                 timestamp: new Date().toLocaleTimeString()
-            })
+            }
+
+            // Add thinking section for AI responses
+            if (type === 'ai' && thinking && thinking.trim()) {
+                message.thinking = thinking
+                message.finalAnswer = finalAnswer || content
+                message.showThinking = false // Collapsed by default
+            } else if (type === 'ai') {
+                console.log('🔍 No thinking added to AI message. Thinking value:', thinking)
+            }
+
+            this.state.aiAssistantMessages.push(message)
 
             // Scroll to bottom
             this.$nextTick(() => {
@@ -198,6 +239,15 @@ export default {
             this.state.aiAssistantSessionId = null
             this.state.aiAssistantSessionInitialized = false
             console.log('🗑️ Session cleared')
+        },
+
+        toggleThinking (messageIndex) {
+            const message = this.state.aiAssistantMessages[messageIndex]
+            if (message && message.type === 'ai') {
+                message.showThinking = !message.showThinking
+                // Force Vue reactivity
+                this.$set(this.state.aiAssistantMessages, messageIndex, message)
+            }
         },
 
         async setup () {
@@ -459,6 +509,56 @@ export default {
         font-size: 0.8em;
         color: #666;
         text-align: right;
+    }
+
+    /* AI Response with Thinking Section */
+    .ai-response {
+        margin-top: 8px;
+    }
+
+    .final-answer {
+        font-weight: 500;
+        margin-bottom: 8px;
+        padding: 8px;
+        background: rgba(255, 255, 255, 0.7);
+        border-radius: 4px;
+        border-left: 3px solid #4CAF50;
+    }
+
+    .thinking-section {
+        margin-top: 8px;
+    }
+
+    .thinking-toggle {
+        background: #f8f9fa;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 11px;
+        cursor: pointer;
+        color: #666;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .thinking-toggle:hover {
+        background: #e9ecef;
+        color: #495057;
+    }
+
+    .thinking-content {
+        margin-top: 8px;
+        padding: 8px;
+        background: #f8f9fa;
+        border: 1px solid #e9ecef;
+        border-radius: 4px;
+        font-size: 11px;
+        color: #666;
+        font-style: italic;
+        line-height: 1.4;
+        max-height: 200px;
+        overflow-y: auto;
     }
 
     .chat-input {

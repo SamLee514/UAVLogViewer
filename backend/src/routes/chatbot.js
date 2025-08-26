@@ -121,6 +121,7 @@ router.post('/chat', async (req, res) => {
     
     res.json({
       response: result.response,
+      thinking: result.thinking,
       relevantDocs: result.relevantDocs,
       timestamp: new Date().toISOString()
     });
