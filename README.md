@@ -25,7 +25,12 @@ npm run e2e
 
 # run all tests
 npm test
-```
+
+# format code with ESLint
+npm run format
+
+# check code formatting
+npm run format:check
 
 # Docker
 

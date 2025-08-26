@@ -29,6 +29,7 @@ import {
     PointPrimitiveCollection,
     ImageryLayer,
     IonImageryProvider,
+    IonWorldImageryStyle,
     Entity,
     ScreenSpaceEventHandler,
     ScreenSpaceEventType,
@@ -262,9 +263,10 @@ export default {
                         selectionIndicator: false,
                         shadows: true,
                         // eslint-disable-next-line
-                        baseLayer: new ImageryLayer.fromProviderAsync(
-                            IonImageryProvider.fromAssetId(3954)
-                        ),
+                        baseLayer: ImageryLayer.fromWorldImagery({
+                            style: IonWorldImageryStyle.AERIAL_WITH_LABELS
+                        }),
+                        baseLayerPicker: false,
                         imageryProviderViewModels: imageryProviders,
                         orderIndependentTranslucency: false,
                         useBrowserRecommendedResolution: false

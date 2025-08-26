@@ -27,6 +27,7 @@ export const store = {
     showFences: true,
     showMap: false,
     showMagFit: false,
+    showAIAssistant: false,
     currentTime: false,
     processDone: false,
     plotOn: false,
@@ -60,6 +61,9 @@ export const store = {
         '#9467BD',
         '#8C564B'],
     radioMode: '2',
+    aiAssistantMessages: [], // TODO: consider moving messages to backend
+    aiAssistantSessionId: null,
+    aiAssistantSessionInitialized: false,
     /* global _COMMIT_ */
     commit: _COMMIT_.slice(0, 6),
     /* global _BUILDDATE_ */
