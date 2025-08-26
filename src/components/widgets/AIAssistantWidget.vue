@@ -444,6 +444,15 @@ export default {
 
     .message-content {
         margin-bottom: 4px;
+        user-select: text;
+        cursor: text;
+        padding: 2px;
+        border-radius: 2px;
+        transition: background-color 0.2s ease;
+    }
+
+    .message-content:hover {
+        background-color: rgba(0, 0, 0, 0.05);
     }
 
     .message-time {
@@ -494,6 +503,7 @@ export default {
         cursor: pointer;
         text-align: left;
         font-size: 12px;
+        user-select: text;
     }
 
     .quick-question-btn:hover {
@@ -503,6 +513,8 @@ export default {
     .log-status {
         font-size: 12px;
         line-height: 1.4;
+        user-select: text;
+        cursor: text;
     }
 
     .no-log {
@@ -523,7 +535,7 @@ export default {
         z-index: 10000;
         box-shadow: 9px 9px 3px -6px rgba(26, 26, 26, 0.699);
         border-radius: 5px;
-        user-select: none;
+        user-select: text;
     }
 
     div #paneAIAssistantWidget::before {
@@ -564,10 +576,10 @@ export default {
     div#paneContent {
         height: 100%;
         overflow: auto;
-        -webkit-user-select: none;
-        -moz-user-select: none;
-        -ms-user-select: none;
-        user-select: none;
+        -webkit-user-select: text;
+        -moz-user-select: text;
+        -ms-user-select: text;
+        user-select: text;
     }
 
     div#paneContent ul {
