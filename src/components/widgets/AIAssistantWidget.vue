@@ -318,68 +318,64 @@ export default {
         },
 
         compressLogData () {
-            // Compress log data to reduce payload size while keeping essential information
-            const compressed = {
+            // TODO: For production systems with very large log files (>100MB),
+            // consider implementing chunking or streaming to avoid memory issues
+            // and improve initial load times. Current approach loads entire file into memory.
+
+            // Send complete, uncompressed log data for maximum AI accuracy
+            const logData = {
                 file: this.state.file,
                 logType: this.state.logType,
                 processStatus: this.state.processStatus,
-                metadata: this.state.metadata
+                metadata: this.state.metadata,
+                fileHash: this.state.file ? this.generateFileHash() : null
             }
 
-            // Add a hash of the file content for change detection
-            if (this.state.file) {
-                compressed.fileHash = this.generateFileHash()
-            }
-
-            // Add message types and counts (not full data)
+            // Include complete message data (no compression, no assumptions)
             if (this.state.messages) {
-                compressed.messageTypes = Object.keys(this.state.messages)
-                compressed.messageCounts = {}
-                Object.keys(this.state.messages).forEach(type => {
-                    if (this.state.messages[type] && Array.isArray(this.state.messages[type])) {
-                        compressed.messageCounts[type] = this.state.messages[type].length
-                    }
-                })
+                logData.messages = this.state.messages
             }
 
-            // Add trajectory summary
+            // Include complete trajectory data
             if (this.state.trajectories) {
-                compressed.trajectorySources = Object.keys(this.state.trajectories)
-                compressed.trajectoryCounts = {}
-                Object.keys(this.state.trajectories).forEach(source => {
-                    if (this.state.trajectories[source] && this.state.trajectories[source].trajectory) {
-                        compressed.trajectoryCounts[source] = this.state.trajectories[source].trajectory.length
-                    }
-                })
+                logData.trajectories = this.state.trajectories
             }
 
-            // Add parameters summary
-            if (this.state.params && this.state.params.values) {
-                compressed.paramCount = Object.keys(this.state.params.values).length
-                compressed.paramCategories = Object.keys(this.state.params.values).reduce((cats, param) => {
-                    const category = param.split('_')[0]
-                    cats[category] = (cats[category] || 0) + 1
-                    return cats
-                }, {})
+            // Include complete parameter data
+            if (this.state.params) {
+                logData.params = this.state.params
             }
 
-            // Add events summary
+            // Include complete event data
             if (this.state.events) {
-                compressed.eventCount = this.state.events.length
-                compressed.eventTypes = this.state.events.reduce((types, event) => {
-                    const type = event.id || 'unknown'
-                    types[type] = (types[type] || 0) + 1
-                    return types
-                }, {})
+                logData.events = this.state.events
             }
 
-            // Add flight mode changes
+            // Include complete flight mode changes
             if (this.state.flightModeChanges) {
-                compressed.flightModeCount = this.state.flightModeChanges.length
-                compressed.flightModes = [...new Set(this.state.flightModeChanges.map(mode => mode[1]))]
+                logData.flightModeChanges = this.state.flightModeChanges
             }
 
-            return compressed
+            // Include any other available data without assumptions
+            if (this.state.namedFloats) {
+                logData.namedFloats = this.state.namedFloats
+            }
+
+            if (this.state.mission) {
+                logData.mission = this.state.mission
+            }
+
+            if (this.state.fences) {
+                logData.fences = this.state.fences
+            }
+
+            console.log('📊 Sending complete log data to backend:', {
+                messageTypes: this.state.messages ? Object.keys(this.state.messages) : [],
+                trajectorySources: this.state.trajectories ? Object.keys(this.state.trajectories) : [],
+                totalDataSize: JSON.stringify(logData).length / 1024 / 1024 + ' MB'
+            })
+
+            return logData
         },
 
         generateFileHash () {
