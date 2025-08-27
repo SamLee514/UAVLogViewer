@@ -156,6 +156,20 @@ class LogDataProcessor {
     }
 
     /**
+     * Get list of available message types
+     * @returns {Promise<Array>} List of available message types
+     */
+    async getMessageTypes() {
+        try {
+            const tables = await this.duckdbService.getTables();
+            return tables.map(tableName => this.getMessageTypeFromTable(tableName));
+        } catch (error) {
+            console.error('❌ Failed to get message types:', error);
+            return [];
+        }
+    }
+
+    /**
      * Get message type from table name
      * @param {string} tableName - The table name
      * @returns {string} The message type

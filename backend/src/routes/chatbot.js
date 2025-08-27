@@ -123,6 +123,9 @@ router.post('/chat', async (req, res) => {
       response: result.response,
       thinking: result.thinking,
       relevantDocs: result.relevantDocs,
+      dataSchema: result.dataSchema,
+      availableTables: result.availableTables,
+      queryValidation: result.queryValidation,
       timestamp: new Date().toISOString()
     });
 
@@ -145,6 +148,106 @@ router.get('/sessions/stats', async (req, res) => {
   }
 });
 
+// Get available data schema for a session
+router.get('/sessions/:sessionId/schema', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await chatbotService.validateSession(sessionId);
+    
+    if (!session) {
+      return res.status(404).json({ 
+        error: 'Session not found', 
+        message: 'Session not found or expired' 
+      });
+    }
 
+    const dataSchema = await chatbotService.logDataProcessor.getDataSchema();
+    const availableTables = await chatbotService.logDataProcessor.getAvailableTables();
+    
+    res.json({
+      sessionId,
+      dataSchema,
+      availableTables,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Schema retrieval error:', error);
+    res.status(500).json({ 
+      error: 'Internal Server Error', 
+      message: 'Failed to retrieve data schema' 
+    });
+  }
+});
+
+// Execute a direct SQL query (for debugging/testing)
+router.post('/sessions/:sessionId/query', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { sql } = req.body;
+    
+    if (!sql) {
+      return res.status(400).json({ 
+        error: 'Bad Request', 
+        message: 'SQL query is required' 
+      });
+    }
+
+    const session = await chatbotService.validateSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ 
+        error: 'Session not found', 
+        message: 'Session not found or expired' 
+      });
+    }
+
+    const result = await chatbotService.logDataProcessor.query(sql);
+    
+    res.json({
+      sessionId,
+      sql,
+      result,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Query execution error:', error);
+    res.status(500).json({ 
+      error: 'Internal Server Error', 
+      message: 'Failed to execute query',
+      details: error.message
+    });
+  }
+});
+
+// Get query validation history for a session
+router.get('/sessions/:sessionId/validation-history', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await chatbotService.validateSession(sessionId);
+    
+    if (!session) {
+      return res.status(404).json({ 
+        error: 'Session not found', 
+        message: 'Session not found or expired' 
+      });
+    }
+
+    const history = chatbotService.queryValidator.getQueryHistory();
+    
+    res.json({
+      sessionId,
+      queryHistory: history,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Validation history error:', error);
+    res.status(500).json({ 
+      error: 'Internal Server Error', 
+      message: 'Failed to retrieve validation history' 
+    });
+  }
+});
 
 module.exports = router;

@@ -2,6 +2,7 @@ const OpenAI = require('openai');
 const RAGService = require('./ragService');
 const SessionManager = require('./sessionManager');
 const LogDataProcessor = require('./logDataProcessor');
+const QueryValidator = require('./queryValidator');
 
 class ChatbotService {
     constructor() {
@@ -11,6 +12,7 @@ class ChatbotService {
         this.ragService = new RAGService();
         this.sessionManager = new SessionManager();
         this.logDataProcessor = new LogDataProcessor();
+        this.queryValidator = new QueryValidator(this.logDataProcessor);
         this.conversationHistory = new Map(); // sessionId -> conversation history
     }
 
@@ -67,14 +69,88 @@ class ChatbotService {
             // Prepare the prompt with context
             const prompt = this.buildPrompt(userMessage, relevantDocs, session.logData, sessionId, dataSchema, availableTables);
             
-            // Get AI response
-            const response = await this.getAIResponse(prompt);
+            // Define available tools for the LLM
+            const availableTools = [
+                {
+                    type: "function",
+                    function: {
+                        name: "queryData",
+                        description: "Execute SQL queries on the telemetry data to get exact results",
+                        parameters: {
+                            type: "object",
+                            properties: {
+                                sql: {
+                                    type: "string",
+                                    description: "SQL query to execute (e.g., 'SELECT MAX(Alt) FROM gps_0_data')"
+                                }
+                            },
+                            required: ["sql"]
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "getMessageTypes",
+                        description: "Get list of available message types in the log data",
+                        parameters: {
+                            type: "object",
+                            properties: {}
+                        }
+                    }
+                },
+                {
+                    type: "function",
+                    function: {
+                        name: "getDataSchema",
+                        description: "Get detailed schema information for all available tables",
+                        parameters: {
+                            type: "object",
+                            properties: {}
+                        }
+                    }
+                }
+            ];
+
+            // Get AI response with tools
+            const response = await this.getAIResponse(prompt, availableTools);
+            
+            // Validate the response by executing any mentioned queries
+            console.log('🔍 Validating LLM response for query accuracy...');
+            const validationResult = await this.queryValidator.validateResponse(response);
             
             // Add AI response to session history
             this.addToHistory(sessionId, 'assistant', response);
             
             // Parse the response to separate reasoning from final answer
             const parsedResponse = this.parseAIResponse(response);
+            
+            // Generate corrective feedback if there are discrepancies
+            let finalResponse = response;
+            let correctiveFeedback = '';
+            
+            if (validationResult.queriesWithDiscrepancies > 0) {
+                console.log(`🚨 Found ${validationResult.queriesWithDiscrepancies} queries with discrepancies`);
+                correctiveFeedback = this.queryValidator.generateCorrectiveFeedback(validationResult.validations);
+                
+                // If there are major discrepancies, ask the LLM to correct itself
+                if (validationResult.queriesWithDiscrepancies > 0) {
+                    const correctionPrompt = `Your previous response contained incorrect data. Here are the actual query results:
+
+${correctiveFeedback}
+
+Please provide a corrected response using ONLY the actual data from the queries above. Do not make up any numbers.`;
+                    
+                    console.log('🔄 Requesting correction from LLM...');
+                    const correctedResponse = await this.getAIResponse(correctionPrompt);
+                    finalResponse = correctedResponse;
+                    
+                    // Parse the corrected response
+                    const correctedParsed = this.parseAIResponse(correctedResponse);
+                    parsedResponse.finalAnswer = correctedParsed.finalAnswer;
+                    parsedResponse.reasoning = correctedParsed.reasoning;
+                }
+            }
             
             console.log('🔍 Parsed AI response:', {
                 original: response.substring(0, 500) + '...',
@@ -91,7 +167,13 @@ class ChatbotService {
                     similarity: doc.similarity.toFixed(3)
                 })),
                 dataSchema: dataSchema,
-                availableTables: availableTables
+                availableTables: availableTables,
+                queryValidation: {
+                    totalQueries: validationResult.totalQueries,
+                    validQueries: validationResult.validQueries,
+                    queriesWithDiscrepancies: validationResult.queriesWithDiscrepancies,
+                    hasDiscrepancies: validationResult.queriesWithDiscrepancies > 0
+                }
             };
             
         } catch (error) {
@@ -260,20 +342,25 @@ IMPORTANT: You now have access to the COMPLETE, UNCOMPRESSED log dataset loaded 
 - Full trajectory data with precise coordinates
 - Any other telemetry data available in the logs
 
-QUERY TOOLS AVAILABLE:
-You can use these tools to analyze the data:
-- queryData(sql) - Execute SQL queries on the telemetry data
-- getMessageTypes() - Get list of available message types
-- getDataSchema() - Get schema information for all tables
+🔧 TOOL USAGE INSTRUCTIONS:
+You have access to powerful tools to analyze the data. Use them instead of guessing:
 
-ANALYSIS APPROACH:
-Instead of trying to parse raw numbers, use SQL queries to:
-- Find maximums/minimums: SELECT MAX(alt) FROM gps_data
-- Calculate averages: SELECT AVG(roll) FROM att_data  
-- Filter by time: WHERE time_boot_ms BETWEEN 0 AND 300000
-- Join related data: GPS + attitude for position analysis
+1. queryData(sql) - Execute SQL queries to get exact results
+2. getMessageTypes() - See what data types are available
+3. getDataSchema() - Get detailed schema information
 
-Be confident and decisive - you have the complete dataset to work with and powerful query tools.`;
+EXAMPLE USAGE:
+- To find maximum altitude: Use queryData("SELECT MAX(Alt) FROM gps_0_data")
+- To count records: Use queryData("SELECT COUNT(*) FROM att_data")
+- To get data schema: Use getDataSchema()
+
+⚠️ IMPORTANT: Always use the tools to get real data. Do not make up numbers or results!
+
+📊 DUCKDB COMPATIBILITY NOTES:
+- Use PERCENTILE(0.5) instead of PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY column)
+- Use time_boot_ms (not TimeUS) for timestamps
+- Use Alt for altitude, Roll for roll, Pitch for pitch
+- All tables have time_boot_ms as the primary time column`;
 
         return prompt;
     }
@@ -329,7 +416,7 @@ Be confident and decisive - you have the complete dataset to work with and power
         return result;
     }
 
-    async getAIResponse(prompt) {
+    async getAIResponse(prompt, availableTools = []) {
         try {
             const completion = await this.openai.chat.completions.create({
                 model: "gpt-4.1-nano",
@@ -343,11 +430,21 @@ Be confident and decisive - you have the complete dataset to work with and power
                         content: prompt
                     }
                 ],
+                tools: availableTools,
+                tool_choice: "auto", // Force the LLM to use tools when needed
                 max_tokens: 1000,
                 temperature: 0.7
             });
 
-            return completion.choices[0].message.content;
+            const message = completion.choices[0].message;
+            
+            // Check if the LLM made tool calls
+            if (message.tool_calls && message.tool_calls.length > 0) {
+                console.log(`🔧 LLM made ${message.tool_calls.length} tool call(s)`);
+                return await this.handleToolCalls(message.tool_calls, prompt);
+            }
+            
+            return message.content;
         } catch (error) {
             console.error('❌ OpenAI API error:', error);
             throw new Error('Failed to get AI response');
@@ -412,6 +509,109 @@ Be confident and decisive - you have the complete dataset to work with and power
             console.error('Error validating session:', error);
             return null;
         }
+    }
+
+    /**
+     * Handle tool calls made by the LLM
+     * @param {Array} toolCalls - Array of tool calls from the LLM
+     * @param {string} originalPrompt - The original user prompt
+     * @returns {Promise<string>} Final response after tool execution
+     */
+    async handleToolCalls(toolCalls, originalPrompt) {
+        console.log('🔄 Handling tool calls...');
+        
+        const toolResults = [];
+        
+        // Execute each tool call
+        for (const toolCall of toolCalls) {
+            try {
+                console.log(`🔧 Executing tool: ${toolCall.function.name}`);
+                
+                let result;
+                switch (toolCall.function.name) {
+                    case 'queryData':
+                        const { sql } = JSON.parse(toolCall.function.arguments);
+                        console.log(`📊 Executing SQL: ${sql}`);
+                        result = await this.logDataProcessor.query(sql);
+                        break;
+                        
+                    case 'getMessageTypes':
+                        result = await this.logDataProcessor.getMessageTypes();
+                        break;
+                        
+                    case 'getDataSchema':
+                        result = await this.logDataProcessor.getDataSchema();
+                        break;
+                        
+                    default:
+                        result = { error: `Unknown tool: ${toolCall.function.name}` };
+                }
+                
+                // Handle BigInt serialization issue
+                let serializedResult;
+                try {
+                    serializedResult = JSON.stringify(result, (key, value) => {
+                        if (typeof value === 'bigint') {
+                            return Number(value);
+                        }
+                        return value;
+                    });
+                } catch (error) {
+                    console.warn(`⚠️ Serialization error for ${toolCall.function.name}:`, error);
+                    serializedResult = JSON.stringify({ error: 'Serialization failed', originalError: error.message });
+                }
+                
+                toolResults.push({
+                    tool_call_id: toolCall.id,
+                    role: "tool",
+                    name: toolCall.function.name,
+                    content: serializedResult
+                });
+                
+                console.log(`✅ Tool ${toolCall.function.name} executed successfully`);
+                
+            } catch (error) {
+                console.error(`❌ Error executing tool ${toolCall.function.name}:`, error);
+                toolResults.push({
+                    tool_call_id: toolCall.id,
+                    role: "tool",
+                    name: toolCall.function.name,
+                    content: JSON.stringify({ error: error.message })
+                });
+            }
+        }
+        
+        // Continue the conversation with tool results
+        console.log('🔄 Continuing conversation with tool results...');
+        
+        // We need to include the assistant message that made the tool calls
+        const assistantMessage = {
+            role: "assistant",
+            content: null,
+            tool_calls: toolCalls
+        };
+        
+        const messages = [
+            {
+                role: "system",
+                content: "You are an expert UAV telemetry analyst. Use the tool results to provide accurate answers."
+            },
+            {
+                role: "user",
+                content: originalPrompt
+            },
+            assistantMessage,
+            ...toolResults
+        ];
+        
+        const finalResponse = await this.openai.chat.completions.create({
+            model: "gpt-4.1-nano",
+            messages: messages,
+            max_tokens: 1000,
+            temperature: 0.7
+        });
+        
+        return finalResponse.choices[0].message.content;
     }
 }
 
