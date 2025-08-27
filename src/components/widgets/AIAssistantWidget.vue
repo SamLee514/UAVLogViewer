@@ -25,11 +25,6 @@
 
                                                                 <!-- AI Response with Thinking Section -->
                                 <div v-if="message.type === 'ai' && message.thinking" class="ai-response">
-                                    <!-- Debug info -->
-                                    <div style="font-size: 10px; color: #999; margin-bottom: 5px;">
-                                        DEBUG: Has thinking: {{ !!message.thinking }},
-                                        Length: {{ message.thinking ? message.thinking.length : 0 }}
-                                    </div>
 
                                     <!-- Final Answer (always visible) -->
                                     <div class="final-answer">

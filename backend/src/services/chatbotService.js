@@ -3,6 +3,7 @@ const RAGService = require('./ragService');
 const SessionManager = require('./sessionManager');
 const LogDataProcessor = require('./logDataProcessor');
 const QueryValidator = require('./queryValidator');
+const AnswerValidator = require('./answerValidator');
 
 class ChatbotService {
     constructor() {
@@ -13,6 +14,7 @@ class ChatbotService {
         this.sessionManager = new SessionManager();
         this.logDataProcessor = new LogDataProcessor();
         this.queryValidator = new QueryValidator(this.logDataProcessor);
+        this.answerValidator = new AnswerValidator(process.env.OPENAI_API_KEY);
         this.conversationHistory = new Map(); // sessionId -> conversation history
     }
 
@@ -53,6 +55,24 @@ class ChatbotService {
                     response: "Session not found. Please refresh the page and try again.",
                     relevantDocs: [],
                     error: "SESSION_NOT_FOUND"
+                };
+            }
+            
+            // Detect potential prompt injection attempts
+            console.log('🔒 Checking for prompt injection...');
+            const injectionDetection = await this.answerValidator.detectPromptInjection(userMessage);
+            
+            if (injectionDetection.isSuspicious) {
+                console.log(`🚨 Potential prompt injection detected: ${injectionDetection.reason} (Risk: ${injectionDetection.riskLevel})`);
+                
+                return {
+                    response: "I cannot process this request as it appears to contain suspicious content. Please ask a clear question about your flight data.",
+                    thinking: `Prompt injection detected: ${injectionDetection.reason}`,
+                    relevantDocs: [],
+                    dataSchema: null,
+                    availableTables: null,
+                    queryValidation: { totalQueries: 0, validQueries: 0, queriesWithDiscrepancies: 0, hasDiscrepancies: false },
+                    answerValidation: { wasCorrected: false, correctionAttempts: 0, originalResponse: null }
                 };
             }
 
@@ -122,12 +142,53 @@ class ChatbotService {
             // Add AI response to session history
             this.addToHistory(sessionId, 'assistant', response);
             
-            // Parse the response to separate reasoning from final answer
-            const parsedResponse = this.parseAIResponse(response);
-            
-            // Generate corrective feedback if there are discrepancies
+            // Validate answer quality and handle reasoning vs. answers
             let finalResponse = response;
             let correctiveFeedback = '';
+            let answerCorrectionAttempts = 0;
+            
+            // First, validate that the response is actually an answer, not just reasoning
+            console.log('🔍 Validating answer quality...');
+            const answerValidation = await this.answerValidator.validateAnswerQuality(response, userMessage);
+            
+            // Parse the response using the intelligent validation result
+            const parsedResponse = this.parseAIResponse(response, answerValidation);
+            
+            // Handle answer validation corrections (up to 3 retries)
+            if (!answerValidation.isValid && answerCorrectionAttempts < this.answerValidator.maxRetries) {
+                console.log(`🚨 Answer validation failed - response is reasoning, not answer (attempt ${answerCorrectionAttempts + 1})`);
+                
+                // Generate correction prompt for answer quality
+                const answerCorrectionPrompt = this.answerValidator.generateCorrectionPrompt(userMessage, response, answerValidation);
+                
+                console.log('🔄 Requesting answer correction from LLM...');
+                const correctedResponse = await this.getAIResponse(answerCorrectionPrompt, availableTools);
+                finalResponse = correctedResponse;
+                
+                // Parse the corrected response using validation result
+                const correctedParsed = this.parseAIResponse(correctedResponse, answerValidation);
+                parsedResponse.finalAnswer = correctedParsed.finalAnswer;
+                parsedResponse.reasoning = correctedParsed.reasoning;
+                
+                answerCorrectionAttempts++;
+                
+                // Validate the corrected response
+                if (answerCorrectionAttempts < this.answerValidator.maxRetries) {
+                    const revalidation = await this.answerValidator.validateAnswerQuality(correctedResponse, userMessage);
+                    if (!revalidation.isValid) {
+                        console.log(`🚨 Second attempt also failed - trying one more time...`);
+                        const secondCorrectionPrompt = this.answerValidator.generateCorrectionPrompt(userMessage, correctedResponse, revalidation);
+                        const secondCorrectedResponse = await this.getAIResponse(secondCorrectionPrompt, availableTools);
+                        finalResponse = secondCorrectedResponse;
+                        
+                        // Parse the second corrected response using validation result
+                        const secondParsed = this.parseAIResponse(secondCorrectedResponse, revalidation);
+                        parsedResponse.finalAnswer = secondParsed.finalAnswer;
+                        parsedResponse.reasoning = secondParsed.reasoning;
+                        answerCorrectionAttempts++;
+                    }
+                }
+            }
             
             if (validationResult.queriesWithDiscrepancies > 0) {
                 console.log(`🚨 Found ${validationResult.queriesWithDiscrepancies} queries with discrepancies`);
@@ -135,20 +196,25 @@ class ChatbotService {
                 
                 // If there are major discrepancies, ask the LLM to correct itself
                 if (validationResult.queriesWithDiscrepancies > 0) {
-                    const correctionPrompt = `Your previous response contained incorrect data. Here are the actual query results:
+                    const correctionPrompt = `🚨 CRITICAL: Your previous response contained incorrect data!
 
 ${correctiveFeedback}
 
-Please provide a corrected response using ONLY the actual data from the queries above. Do not make up any numbers.`;
+🔧 IMPORTANT: You have access to these tools - USE THEM to get real data:
+- queryData: Execute SQL queries on the telemetry data
+- getMessageTypes: Get list of available message types  
+- getDataSchema: Get detailed schema information
+
+🚨 REQUIREMENT: Use the tools above to query the actual data, then provide a corrected response using ONLY the real data. Do not make up any numbers.`;
                     
                     console.log('🔄 Requesting correction from LLM...');
-                    const correctedResponse = await this.getAIResponse(correctionPrompt);
+                    const correctedResponse = await this.getAIResponse(correctionPrompt, availableTools);
                     finalResponse = correctedResponse;
                     
-                    // Parse the corrected response
-                    const correctedParsed = this.parseAIResponse(correctedResponse);
-                    parsedResponse.finalAnswer = correctedParsed.finalAnswer;
-                    parsedResponse.reasoning = correctedParsed.reasoning;
+                                    // Parse the corrected response using validation result
+                const correctedParsed = this.parseAIResponse(correctedResponse, validationResult);
+                parsedResponse.finalAnswer = correctedParsed.finalAnswer;
+                parsedResponse.reasoning = correctedParsed.reasoning;
                 }
             }
             
@@ -173,6 +239,11 @@ Please provide a corrected response using ONLY the actual data from the queries 
                     validQueries: validationResult.validQueries,
                     queriesWithDiscrepancies: validationResult.queriesWithDiscrepancies,
                     hasDiscrepancies: validationResult.queriesWithDiscrepancies > 0
+                },
+                answerValidation: {
+                    wasCorrected: answerCorrectionAttempts > 0,
+                    correctionAttempts: answerCorrectionAttempts,
+                    originalResponse: answerCorrectionAttempts > 0 ? response : null
                 }
             };
             
@@ -207,7 +278,41 @@ Your role is to:
 3. Detect potential issues or anomalies
 4. Provide insights about flight performance
 
-IMPORTANT: Always maintain an agentic approach. If you need clarification or are not confident about your response, ask specific questions to gather more information.
+🚨 AGENTIC BEHAVIOR REQUIREMENTS:
+- ALWAYS be proactive and ask for clarification when needed
+- If a question is ambiguous, unclear, or could have multiple interpretations, ASK for clarification
+- If you need more specific information to provide a useful answer, REQUEST it
+- If you're not confident about your analysis, SAY SO and ask follow-up questions
+- NEVER guess or make assumptions - either ask for clarification or state what you need to know
+
+🚨 CLARIFICATION TRIGGERS - ASK FOR CLARIFICATION WHEN:
+- Question is vague: "Are there any issues?" → Ask: "What specific issues concern you?"
+- Question is ambiguous: "How does the data look?" → Ask: "What aspects of the data interest you?"
+- Question lacks context: "Is this normal?" → Ask: "What would you consider 'normal' for this flight?"
+- Question is too broad: "Analyze the flight" → Ask: "What specific aspects should I focus on?"
+
+🚨 CLARIFICATION EXAMPLES:
+❌ DON'T: "I will analyze the data to find issues"
+✅ DO: "I can analyze the data, but to give you the most helpful answer, could you clarify: What specific issues are you most concerned about - GPS accuracy, flight stability, altitude problems, or something else?"
+
+🚨 CLARIFICATION FORMAT - BE DIRECT:
+- ❌ DON'T: "To determine if there are issues, I will examine the data..."
+- ✅ DO: "To give you the most helpful answer, could you clarify: [specific question]?"
+
+🚨 FOR VAGUE QUESTIONS, ASK DIRECTLY:
+- "Are there any issues?" → "What specific issues concern you most?"
+- "How does the data look?" → "What aspects of the data interest you?"
+- "Is this normal?" → "What would you consider 'normal' for this flight?"
+
+EXAMPLES OF GOOD AGENTIC BEHAVIOR:
+❌ DON'T: "The flight shows some issues" (vague)
+✅ DO: "I can see several potential issues. To give you the most helpful analysis, could you clarify: Are you most concerned about GPS accuracy, flight stability, or something else specific?"
+
+❌ DON'T: "The altitude data looks normal" (assumption)
+✅ DO: "I can analyze the altitude data, but I need to know: What altitude range would you consider 'normal' for this type of flight? Are you looking for specific altitude thresholds?"
+
+❌ DON'T: "There are some anomalies" (unclear)
+✅ DO: "I've identified several data patterns that could be anomalies. To focus my analysis, could you tell me: What type of issues are you most concerned about - sensor errors, flight performance, or data quality?"
 
 Current user question: "${userMessage}"
 
@@ -345,81 +450,121 @@ IMPORTANT: You now have access to the COMPLETE, UNCOMPRESSED log dataset loaded 
 🔧 TOOL USAGE INSTRUCTIONS:
 You have access to powerful tools to analyze the data. Use them instead of guessing:
 
-1. queryData(sql) - Execute SQL queries to get exact results
+1. getDataSchema() - ALWAYS check this FIRST to see what fields exist
 2. getMessageTypes() - See what data types are available
-3. getDataSchema() - Get detailed schema information
+3. queryData(sql) - Execute SQL queries to get exact results
+
+🚨 REQUIRED WORKFLOW:
+- ALWAYS start with getDataSchema() to see available fields
+- NEVER query for fields that don't exist in the schema
+- If you need to check data availability, use getDataSchema() first
+- SPECIFICALLY: If asked about battery temperature, check getDataSchema() first - there is NO 'Temp' field in XKF4 tables
+- AFTER calling getDataSchema(), you MUST explicitly state whether the field you're looking for exists or not
+- If the field doesn't exist, say "ANSWER: This data is not available in the logs" and explain why
+- CRITICAL: You MUST list the ACTUAL fields returned by getDataSchema() and explicitly state if your target field is missing
+- NEVER claim fields exist that are not in the actual schema response
 
 EXAMPLE USAGE:
+- To check available data: Use getDataSchema() first
 - To find maximum altitude: Use queryData("SELECT MAX(Alt) FROM gps_0_data")
 - To count records: Use queryData("SELECT COUNT(*) FROM att_data")
-- To get data schema: Use getDataSchema()
 
 ⚠️ IMPORTANT: Always use the tools to get real data. Do not make up numbers or results!
+
+🚨 ANTI-HALLUCINATION RULES:
+- NEVER make up data that doesn't exist
+- ALWAYS use getDataSchema() FIRST to see what fields are actually available
+- If a field doesn't exist, say "ANSWER: This data is not available in the logs"
+- If you're unsure, say "ANSWER: I need to check the available data first"
+- NEVER invent field names like 'Temp', 'Battery', etc. - only use fields that exist
+- If you get a database error, it means the field/table doesn't exist - say so
+- Use getMessageTypes() to see what data types are available before querying
+- After checking getDataSchema(), if the field you need is NOT in the list, say "ANSWER: This data is not available in the logs"
+- NEVER claim to have found data that doesn't exist in the schema
+- CRITICAL: When you call getDataSchema(), you MUST list the actual fields returned and acknowledge if the field you're looking for is missing
 
 📊 DUCKDB COMPATIBILITY NOTES:
 - Use PERCENTILE(0.5) instead of PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY column)
 - Use time_boot_ms (not TimeUS) for timestamps
 - Use Alt for altitude, Roll for roll, Pitch for pitch
-- All tables have time_boot_ms as the primary time column`;
+- All tables have time_boot_ms as the primary time column
+
+🚨 SCHEMA TRUTH:
+- XKF4 tables contain: time_boot_ms, C, SV, SP, SH, SM, SVT, errRP, OFN, OFE, FS, TS, SS, GPS, PI
+- XKF4 tables do NOT contain: Temp, Battery, Temperature, or any temperature-related fields
+- If you see getDataSchema() results, trust ONLY those fields, not your training data`;
 
         return prompt;
     }
 
-    parseAIResponse(response) {
+    parseAIResponse(response, validationResult) {
         console.log('🔍 parseAIResponse input:', response.substring(0, 300) + '...');
         
-        // Try to parse structured response with ANSWER/REASONING format
-        const answerMatch = response.match(/ANSWER:\s*(.*?)(?=\nREASONING:|$)/s);
-        const reasoningMatch = response.match(/REASONING:\s*(.*)/s);
-        
-        console.log('🔍 Regex matches:', {
-            answerMatch: answerMatch ? answerMatch[1].substring(0, 100) + '...' : 'none',
-            reasoningMatch: reasoningMatch ? reasoningMatch[1].substring(0, 100) + '...' : 'none'
-        });
-        
-        if (answerMatch && reasoningMatch) {
-            console.log('✅ Found structured ANSWER/REASONING format');
-            return {
-                finalAnswer: answerMatch[1].trim(),
-                reasoning: reasoningMatch[1].trim()
-            };
+        // Use the intelligent validation result to parse the response
+        if (validationResult && validationResult.parsedContent) {
+            const { answer, reasoning, clarification } = validationResult.parsedContent;
+            
+            if (validationResult.outcome === 'CLARIFICATION') {
+                console.log('✅ Response is asking for clarification');
+                // Extract the actual clarification question from the response
+                const clarificationMatch = response.match(/(?:could you|can you|would you|please|what|which|are you|do you).*?\?/i);
+                const extractedClarification = clarificationMatch ? clarificationMatch[0].trim() : response;
+                
+                return {
+                    finalAnswer: extractedClarification,
+                    reasoning: response,
+                    isClarification: true
+                };
+            }
+            
+            if (validationResult.outcome === 'ANSWER') {
+                console.log('✅ Response provides concrete answer');
+                // Extract the actual answer from the response
+                const answerMatch = response.match(/ANSWER:\s*(.*?)(?=\nREASONING:|$)/s);
+                const extractedAnswer = answerMatch ? answerMatch[1].trim() : response;
+                
+                return {
+                    finalAnswer: extractedAnswer,
+                    reasoning: response
+                };
+            }
+            
+            if (validationResult.outcome === 'REASONING') {
+                console.log('⚠️ Response contains reasoning, extracting main point');
+                // Try to extract a concise answer from the first paragraph
+                const paragraphs = response.split('\n\n');
+                const firstParagraph = paragraphs[0] || response;
+                
+                // Find the first sentence that looks like a direct statement
+                const sentences = firstParagraph.split(/[.!?]+/);
+                const directStatement = sentences.find(sentence => 
+                    sentence.trim().length > 10 && 
+                    sentence.trim().length < 200 &&
+                    !sentence.includes('I will') &&
+                    !sentence.includes('Let me') &&
+                    !sentence.includes('To determine') &&
+                    !sentence.includes('Based on')
+                );
+                
+                return {
+                    finalAnswer: directStatement ? directStatement.trim() + '.' : response,
+                    reasoning: response
+                };
+            }
         }
         
-        console.log('⚠️ No structured format found, using fallback parsing');
-        
-        // Fallback: if no structured format, treat entire response as reasoning
-        // and try to extract a concise answer from the first paragraph
-        const paragraphs = response.split('\n\n');
-        const firstParagraph = paragraphs[0] || response;
-        
-        // Try to find a sentence that looks like a direct answer
-        const sentences = firstParagraph.split(/[.!?]+/);
-        const directAnswer = sentences.find(sentence => 
-            sentence.trim().length > 10 && 
-            sentence.trim().length < 200 &&
-            !sentence.includes('Could you clarify') &&
-            !sentence.includes('Would you like me to') &&
-            !sentence.includes('Alternatively') &&
-            !sentence.includes('If you prefer')
-        );
-        
-        const result = {
-            finalAnswer: directAnswer ? directAnswer.trim() + '.' : response.substring(0, 300) + '...',
+        // Fallback: if no validation result, treat as general response
+        console.log('⚠️ No validation result, using response as-is');
+        return {
+            finalAnswer: response,
             reasoning: response
         };
-        
-        console.log('🔍 Fallback parsing result:', {
-            finalAnswer: result.finalAnswer.substring(0, 100) + '...',
-            reasoningLength: result.reasoning.length
-        });
-        
-        return result;
     }
 
     async getAIResponse(prompt, availableTools = []) {
         try {
             const completion = await this.openai.chat.completions.create({
-                model: "gpt-4.1-nano",
+                model: "gpt-4o",
                 messages: [
                     {
                         role: "system",
@@ -605,7 +750,7 @@ EXAMPLE USAGE:
         ];
         
         const finalResponse = await this.openai.chat.completions.create({
-            model: "gpt-4.1-nano",
+            model: "gpt-4o",
             messages: messages,
             max_tokens: 1000,
             temperature: 0.7
