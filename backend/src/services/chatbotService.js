@@ -3,7 +3,6 @@ const RAGService = require('./ragService');
 const SessionManager = require('./sessionManager');
 const LogDataProcessor = require('./logDataProcessor');
 const QueryValidator = require('./queryValidator');
-const AnswerValidator = require('./answerValidator');
 
 class ChatbotService {
     constructor() {
@@ -14,7 +13,6 @@ class ChatbotService {
         this.sessionManager = new SessionManager();
         this.logDataProcessor = new LogDataProcessor();
         this.queryValidator = new QueryValidator(this.logDataProcessor);
-        this.answerValidator = new AnswerValidator(process.env.OPENAI_API_KEY);
         this.conversationHistory = new Map(); // sessionId -> conversation history
     }
 
@@ -55,24 +53,6 @@ class ChatbotService {
                     response: "Session not found. Please refresh the page and try again.",
                     relevantDocs: [],
                     error: "SESSION_NOT_FOUND"
-                };
-            }
-            
-            // Detect potential prompt injection attempts
-            console.log('🔒 Checking for prompt injection...');
-            const injectionDetection = await this.answerValidator.detectPromptInjection(userMessage);
-            
-            if (injectionDetection.isSuspicious) {
-                console.log(`🚨 Potential prompt injection detected: ${injectionDetection.reason} (Risk: ${injectionDetection.riskLevel})`);
-                
-                return {
-                    response: "I cannot process this request as it appears to contain suspicious content. Please ask a clear question about your flight data.",
-                    thinking: `Prompt injection detected: ${injectionDetection.reason}`,
-                    relevantDocs: [],
-                    dataSchema: null,
-                    availableTables: null,
-                    queryValidation: { totalQueries: 0, validQueries: 0, queriesWithDiscrepancies: 0, hasDiscrepancies: false },
-                    answerValidation: { wasCorrected: false, correctionAttempts: 0, originalResponse: null }
                 };
             }
 
@@ -142,54 +122,11 @@ class ChatbotService {
             // Add AI response to session history
             this.addToHistory(sessionId, 'assistant', response);
             
-            // Validate answer quality and handle reasoning vs. answers
+            // Simple response handling - no second LLM validation
             let finalResponse = response;
             let correctiveFeedback = '';
-            let answerCorrectionAttempts = 0;
             
-            // First, validate that the response is actually an answer, not just reasoning
-            console.log('🔍 Validating answer quality...');
-            const answerValidation = await this.answerValidator.validateAnswerQuality(response, userMessage);
-            
-            // Parse the response using the intelligent validation result
-            const parsedResponse = this.parseAIResponse(response, answerValidation);
-            
-            // Handle answer validation corrections (up to 3 retries)
-            if (!answerValidation.isValid && answerCorrectionAttempts < this.answerValidator.maxRetries) {
-                console.log(`🚨 Answer validation failed - response is reasoning, not answer (attempt ${answerCorrectionAttempts + 1})`);
-                
-                // Generate correction prompt for answer quality
-                const answerCorrectionPrompt = this.answerValidator.generateCorrectionPrompt(userMessage, response, answerValidation);
-                
-                console.log('🔄 Requesting answer correction from LLM...');
-                const correctedResponse = await this.getAIResponse(answerCorrectionPrompt, availableTools);
-                finalResponse = correctedResponse;
-                
-                // Parse the corrected response using validation result
-                const correctedParsed = this.parseAIResponse(correctedResponse, answerValidation);
-                parsedResponse.finalAnswer = correctedParsed.finalAnswer;
-                parsedResponse.reasoning = correctedParsed.reasoning;
-                
-                answerCorrectionAttempts++;
-                
-                // Validate the corrected response
-                if (answerCorrectionAttempts < this.answerValidator.maxRetries) {
-                    const revalidation = await this.answerValidator.validateAnswerQuality(correctedResponse, userMessage);
-                    if (!revalidation.isValid) {
-                        console.log(`🚨 Second attempt also failed - trying one more time...`);
-                        const secondCorrectionPrompt = this.answerValidator.generateCorrectionPrompt(userMessage, correctedResponse, revalidation);
-                        const secondCorrectedResponse = await this.getAIResponse(secondCorrectionPrompt, availableTools);
-                        finalResponse = secondCorrectedResponse;
-                        
-                        // Parse the second corrected response using validation result
-                        const secondParsed = this.parseAIResponse(secondCorrectedResponse, revalidation);
-                        parsedResponse.finalAnswer = secondParsed.finalAnswer;
-                        parsedResponse.reasoning = secondParsed.reasoning;
-                        answerCorrectionAttempts++;
-                    }
-                }
-            }
-            
+            // Only handle query validation corrections (no answer quality validation)
             if (validationResult.queriesWithDiscrepancies > 0) {
                 console.log(`🚨 Found ${validationResult.queriesWithDiscrepancies} queries with discrepancies`);
                 correctiveFeedback = this.queryValidator.generateCorrectiveFeedback(validationResult.validations);
@@ -210,24 +147,19 @@ ${correctiveFeedback}
                     console.log('🔄 Requesting correction from LLM...');
                     const correctedResponse = await this.getAIResponse(correctionPrompt, availableTools);
                     finalResponse = correctedResponse;
-                    
-                                    // Parse the corrected response using validation result
-                const correctedParsed = this.parseAIResponse(correctedResponse, validationResult);
-                parsedResponse.finalAnswer = correctedParsed.finalAnswer;
-                parsedResponse.reasoning = correctedParsed.reasoning;
                 }
             }
             
-            console.log('🔍 Parsed AI response:', {
+            console.log('🔍 Final AI response:', {
                 original: response.substring(0, 500) + '...',
-                finalAnswer: parsedResponse.finalAnswer,
-                reasoning: parsedResponse.reasoning ? parsedResponse.reasoning.substring(0, 200) + '...' : 'none',
-                originalLength: response.length
+                final: finalResponse.substring(0, 500) + '...',
+                originalLength: response.length,
+                finalLength: finalResponse.length
             });
             
             return {
-                response: parsedResponse.finalAnswer,
-                thinking: parsedResponse.reasoning,
+                response: finalResponse,
+                thinking: null, // No more reasoning parsing
                 relevantDocs: relevantDocs.map(doc => ({
                     content: doc.content.substring(0, 200) + '...',
                     similarity: doc.similarity.toFixed(3)
@@ -241,9 +173,9 @@ ${correctiveFeedback}
                     hasDiscrepancies: validationResult.queriesWithDiscrepancies > 0
                 },
                 answerValidation: {
-                    wasCorrected: answerCorrectionAttempts > 0,
-                    correctionAttempts: answerCorrectionAttempts,
-                    originalResponse: answerCorrectionAttempts > 0 ? response : null
+                    wasCorrected: false, // No more answer validation
+                    correctionAttempts: 0,
+                    originalResponse: null
                 }
             };
             
@@ -272,47 +204,62 @@ ${correctiveFeedback}
     buildPrompt(userMessage, relevantDocs, logData, sessionId, dataSchema, availableTables) {
         let prompt = `You are an AI assistant specialized in analyzing UAV telemetry logs from ArduPilot-based vehicles. 
 
-Your role is to:
-1. Help users understand their flight data
-2. Analyze telemetry information
-3. Detect potential issues or anomalies
-4. Provide insights about flight performance
+🚨 CRITICAL DECISION TREE - You MUST choose ONE path:
 
-🚨 AGENTIC BEHAVIOR REQUIREMENTS:
-- ALWAYS be proactive and ask for clarification when needed
-- If a question is ambiguous, unclear, or could have multiple interpretations, ASK for clarification
-- If you need more specific information to provide a useful answer, REQUEST it
-- If you're not confident about your analysis, SAY SO and ask follow-up questions
-- NEVER guess or make assumptions - either ask for clarification or state what you need to know
+PATH 1: ANSWER WITH DATA
+- If you can answer the question using available data → USE TOOLS to get real data
+- Execute getDataSchema() first, then queryData() for specific values
+- Provide a concrete, data-driven answer
+
+PATH 2: ASK FOR CLARIFICATION  
+- If the question is vague, ambiguous, or unclear → ASK SPECIFIC clarifying questions
+- Do NOT provide reasoning or analysis without data
+- Do NOT end with "I will analyze" or similar statements
+
+🚨 IMMEDIATE ACTION REQUIRED:
+- NO planning statements like "I will now..." or "Let me..."
+- NO descriptions of what you're about to do
+- NO "I will execute the tool" - JUST EXECUTE IT
+- NO "I will analyze" - JUST ANALYZE AND ANSWER
+- START IMMEDIATELY with tool calls or clarification questions
+
+🚨 FORBIDDEN RESPONSES:
+❌ "I will analyze the data to find..."
+❌ "Let me examine the logs..."
+❌ "Based on the available data..."
+❌ "To determine if there are issues..."
+❌ "I will now execute the tool..."
+❌ "I will use the tool to..."
+❌ "Let me use the tool..."
+❌ Any response that ends with reasoning instead of action
+❌ Any response that describes what you WILL do instead of doing it
+
+🚨 REQUIRED RESPONSE FORMAT:
+
+FOR ANSWERS WITH DATA:
+ANSWER: [Concrete, specific answer with actual numbers/values from tools]
+DATA SOURCE: [List the specific tool calls and results used]
+
+FOR CLARIFICATION REQUESTS:
+CLARIFICATION: [Specific, direct question about what the user wants to know]
+REASON: [Brief explanation of why clarification is needed]
+
+🚨 TOOL USAGE ENFORCEMENT:
+- ALWAYS start with getDataSchema() to see available fields
+- If you need specific data → USE queryData() immediately
+- If you can't get the needed data → ASK for clarification
+- NEVER speculate or provide reasoning without data
+- NEVER say "I will use the tool" - JUST USE IT
+- NEVER say "Let me execute the tool" - JUST EXECUTE IT
+- NEVER describe your plan - JUST DO IT
 
 🚨 CLARIFICATION TRIGGERS - ASK FOR CLARIFICATION WHEN:
 - Question is vague: "Are there any issues?" → Ask: "What specific issues concern you?"
-- Question is ambiguous: "How does the data look?" → Ask: "What aspects of the data interest you?"
-- Question lacks context: "Is this normal?" → Ask: "What would you consider 'normal' for this flight?"
+- Question is ambiguous: "How does the data look?" → Ask: "What aspects interest you?"
+- Question lacks context: "Is this normal?" → Ask: "What would you consider 'normal'?"
 - Question is too broad: "Analyze the flight" → Ask: "What specific aspects should I focus on?"
 
-🚨 CLARIFICATION EXAMPLES:
-❌ DON'T: "I will analyze the data to find issues"
-✅ DO: "I can analyze the data, but to give you the most helpful answer, could you clarify: What specific issues are you most concerned about - GPS accuracy, flight stability, altitude problems, or something else?"
-
-🚨 CLARIFICATION FORMAT - BE DIRECT:
-- ❌ DON'T: "To determine if there are issues, I will examine the data..."
-- ✅ DO: "To give you the most helpful answer, could you clarify: [specific question]?"
-
-🚨 FOR VAGUE QUESTIONS, ASK DIRECTLY:
-- "Are there any issues?" → "What specific issues concern you most?"
-- "How does the data look?" → "What aspects of the data interest you?"
-- "Is this normal?" → "What would you consider 'normal' for this flight?"
-
-EXAMPLES OF GOOD AGENTIC BEHAVIOR:
-❌ DON'T: "The flight shows some issues" (vague)
-✅ DO: "I can see several potential issues. To give you the most helpful analysis, could you clarify: Are you most concerned about GPS accuracy, flight stability, or something else specific?"
-
-❌ DON'T: "The altitude data looks normal" (assumption)
-✅ DO: "I can analyze the altitude data, but I need to know: What altitude range would you consider 'normal' for this type of flight? Are you looking for specific altitude thresholds?"
-
-❌ DON'T: "There are some anomalies" (unclear)
-✅ DO: "I've identified several data patterns that could be anomalies. To focus my analysis, could you tell me: What type of issues are you most concerned about - sensor errors, flight performance, or data quality?"
+IF ASKED ABOUT ANOMALY DETECTION OR ISSUES, look for sudden changes in altitude, battery voltage, or inconsistent GPS lock, etc.
 
 Current user question: "${userMessage}"
 
@@ -423,21 +370,36 @@ Current user question: "${userMessage}"
         // Add conversation history for context
         const sessionHistory = this.conversationHistory.get(sessionId);
         if (sessionHistory && sessionHistory.length > 0) {
-            prompt += `\nConversation history:\n`;
-            sessionHistory.slice(-5).forEach(msg => {
-                prompt += `${msg.role}: ${msg.content}\n`;
+            prompt += `\n📚 CONVERSATION HISTORY (Last 10 messages):\n`;
+            sessionHistory.slice(-10).forEach((msg, index) => {
+                const role = msg.role === 'user' ? '👤 USER' : '🤖 ASSISTANT';
+                prompt += `\n--- Message ${index + 1} ---\n`;
+                prompt += `${role}: ${msg.content}\n`;
             });
+            prompt += `\n--- End History ---\n`;
         }
 
-        prompt += `\nPlease provide a helpful, accurate response. If you need clarification or are unsure about any aspect, ask specific questions. Be conversational but professional.
+        prompt += `\n🚨 FINAL INSTRUCTION:
+You MUST choose ONE path:
+1. Use tools to get data and provide ANSWER + DATA SOURCE, OR  
+2. Ask for CLARIFICATION + REASON
 
-CRITICAL: You MUST format your response exactly like this:
+NO OTHER OPTIONS. NO REASONING WITHOUT DATA. NO "I WILL ANALYZE" STATEMENTS.
 
-ANSWER: [Your direct, actionable answer here - be concise and specific]
+🚨 AVAILABLE TOOLS:
+- getDataSchema() - Check available fields FIRST
+- getMessageTypes() - See available data types  
+- queryData(sql) - Execute SQL queries for real data
 
-REASONING: [Your detailed reasoning, analysis steps, and methodology here]
+🚨 REMEMBER: Either answer with real data from tools, or ask for clarification. Nothing else.
 
-Do not deviate from this format. Always start with "ANSWER:" and then "REASONING:" on separate lines.
+🚨 CRITICAL: DO NOT DESCRIBE YOUR ACTIONS - JUST DO THEM:
+- ❌ "I will now use getDataSchema() to check available fields"
+- ✅ Just call getDataSchema() directly
+- ❌ "Let me execute the query to get the data"
+- ✅ Just call queryData() directly
+- ❌ "I will analyze the results"
+- ✅ Just provide the answer based on the results
 
 IMPORTANT: You now have access to the COMPLETE, UNCOMPRESSED log dataset loaded into DuckDB tables. Use this data to provide accurate, data-driven answers. You can analyze:
 - All GPS coordinates, altitudes, and timestamps
@@ -492,73 +454,16 @@ EXAMPLE USAGE:
 🚨 SCHEMA TRUTH:
 - XKF4 tables contain: time_boot_ms, C, SV, SP, SH, SM, SVT, errRP, OFN, OFE, FS, TS, SS, GPS, PI
 - XKF4 tables do NOT contain: Temp, Battery, Temperature, or any temperature-related fields
-- If you see getDataSchema() results, trust ONLY those fields, not your training data`;
+- If you see getDataSchema() results, trust ONLY those fields, not your training data
+
+🚨 FINAL REMINDER:
+- NO "I will now..." statements
+- NO "Let me..." statements  
+- NO planning or describing actions
+- JUST DO IT: Call tools directly or ask clarification
+- START IMMEDIATELY with action, not description`;
 
         return prompt;
-    }
-
-    parseAIResponse(response, validationResult) {
-        console.log('🔍 parseAIResponse input:', response.substring(0, 300) + '...');
-        
-        // Use the intelligent validation result to parse the response
-        if (validationResult && validationResult.parsedContent) {
-            const { answer, reasoning, clarification } = validationResult.parsedContent;
-            
-            if (validationResult.outcome === 'CLARIFICATION') {
-                console.log('✅ Response is asking for clarification');
-                // Extract the actual clarification question from the response
-                const clarificationMatch = response.match(/(?:could you|can you|would you|please|what|which|are you|do you).*?\?/i);
-                const extractedClarification = clarificationMatch ? clarificationMatch[0].trim() : response;
-                
-                return {
-                    finalAnswer: extractedClarification,
-                    reasoning: response,
-                    isClarification: true
-                };
-            }
-            
-            if (validationResult.outcome === 'ANSWER') {
-                console.log('✅ Response provides concrete answer');
-                // Extract the actual answer from the response
-                const answerMatch = response.match(/ANSWER:\s*(.*?)(?=\nREASONING:|$)/s);
-                const extractedAnswer = answerMatch ? answerMatch[1].trim() : response;
-                
-                return {
-                    finalAnswer: extractedAnswer,
-                    reasoning: response
-                };
-            }
-            
-            if (validationResult.outcome === 'REASONING') {
-                console.log('⚠️ Response contains reasoning, extracting main point');
-                // Try to extract a concise answer from the first paragraph
-                const paragraphs = response.split('\n\n');
-                const firstParagraph = paragraphs[0] || response;
-                
-                // Find the first sentence that looks like a direct statement
-                const sentences = firstParagraph.split(/[.!?]+/);
-                const directStatement = sentences.find(sentence => 
-                    sentence.trim().length > 10 && 
-                    sentence.trim().length < 200 &&
-                    !sentence.includes('I will') &&
-                    !sentence.includes('Let me') &&
-                    !sentence.includes('To determine') &&
-                    !sentence.includes('Based on')
-                );
-                
-                return {
-                    finalAnswer: directStatement ? directStatement.trim() + '.' : response,
-                    reasoning: response
-                };
-            }
-        }
-        
-        // Fallback: if no validation result, treat as general response
-        console.log('⚠️ No validation result, using response as-is');
-        return {
-            finalAnswer: response,
-            reasoning: response
-        };
     }
 
     async getAIResponse(prompt, availableTools = []) {
@@ -568,7 +473,7 @@ EXAMPLE USAGE:
                 messages: [
                     {
                         role: "system",
-                        content: "You are an expert UAV telemetry analyst with deep knowledge of ArduPilot systems. Your primary goal is to provide direct, actionable answers to user questions about their flight data. When analyzing logs, be confident and decisive - don't ask for clarification unless absolutely necessary. Use the available log data to provide concrete answers."
+                        content: "You are an expert UAV telemetry analyst with deep knowledge of ArduPilot systems. Your primary goal is to provide direct, actionable answers to user questions about their flight data. When analyzing logs, be confident and decisive - don't ask for clarification unless absolutely necessary. Use the available log data to provide concrete answers. CRITICAL: NO planning statements like 'I will now...' or 'Let me...' - just execute tools directly or ask clarification immediately."
                     },
                     {
                         role: "user",

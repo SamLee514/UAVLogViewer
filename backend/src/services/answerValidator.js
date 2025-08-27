@@ -157,6 +157,8 @@ RESPONSE FORMAT:
   "riskLevel": "LOW/MEDIUM/HIGH"
 }
 
+IF THERE ARE ANY SQL QUERY ERRORS, BUT ALSO A VALID ANSWER, THE ANSWER IS VALID. RETURN THE ANSWER.
+
 Analyze the input above:`;
 
             const completion = await this.openai.chat.completions.create({
