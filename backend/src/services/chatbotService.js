@@ -101,7 +101,7 @@ Example 4 - Complete failure:
 "I encountered an error while processing your request. The database connection failed."
 → {"finalAnswer": null, "thinking": "Database connection failed, unable to process request", "responseType": "error", "issues": ["Database connection failed"], "hasValidAnswer": false}
 
-!!!AGAIN, THIS IS IMPORTANT. IF YOU DON'T FIND AN ANSWER, ASK FOR CLARIFICATION!!!
+!!!AGAIN, THIS IS IMPORTANT. IF YOU DON'T FIND AN ANSWER, ASK FOR CLARIFICATION!!! DO NOT END WITH "No specific answer provided"!
 
 Parse the response above:`;
 

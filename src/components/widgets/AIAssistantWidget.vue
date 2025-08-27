@@ -7,14 +7,6 @@
 
             <div class="section">
                 <h6>Chat</h6>
-                <div class="chat-header">
-                    <button @click="clearChat" class="clear-chat-btn">
-                        <i class="fa fa-trash"></i> Clear Chat
-                    </button>
-                    <button @click="clearSession" class="clear-session-btn">
-                        <i class="fa fa-refresh"></i> New Session
-                    </button>
-                </div>
                 <div class="chat-container">
                     <div class="chat-messages" ref="chatMessages">
                         <div v-for="(message, index) in messages" :key="index"
@@ -224,16 +216,6 @@ export default {
         askQuickQuestion (question) {
             this.currentMessage = question
             this.sendMessage()
-        },
-
-        clearChat () {
-            this.state.aiAssistantMessages = []
-        },
-
-        clearSession () {
-            this.state.aiAssistantSessionId = null
-            this.state.aiAssistantSessionInitialized = false
-            console.log('🗑️ Session cleared')
         },
 
         toggleThinking (messageIndex) {
