@@ -44,6 +44,179 @@ class ChatbotService {
         }
     }
 
+    /**
+     * Parse AI response using a second LLM to extract answer and reasoning
+     * @param {string} response - The AI response text
+     * @returns {object} Parsed response with thinking and finalAnswer
+     */
+    async parseAIResponse(response) {
+        try {
+            const parsingPrompt = `You are a response parser for a UAV telemetry chatbot. Your job is to parse the AI's response and extract the answer and reasoning.
+
+IMPORTANT: You have a BIAS TOWARD PRESERVING ANSWERS. Even if there are tool errors or issues, if there's a valid answer in the response, extract it.
+
+RESPONSE TO PARSE:
+${response}
+
+TASK: Parse this response into a structured format. Look for:
+
+1. ANSWER: The actual answer to the user's question (concrete facts, numbers, conclusions)
+2. REASONING: The data source, tool calls used, or explanation of how the answer was derived
+3. ISSUES: Any tool errors, SQL problems, or technical issues that occurred
+
+PARSING RULES:
+- If there's a valid answer, prioritize extracting it even if there are tool errors
+- If the response asks for clarification, mark it as a clarification request
+- If there are SQL errors but also valid data, still extract the valid answer
+- If there are tool failures but the LLM provides reasonable conclusions, preserve them
+- Be generous in what you consider a "valid answer" - partial answers are better than nothing
+- IF YOU CANNOT FIND AN ANSWER, default to asking for clarification. If "No answer provided" is the only thing you can find, ask for clarification.
+- PREFER SPECIFIC NUMBERS! If you can quantify and specify values, do so. Prefer NOT to just say "there were multiple issues".
+- Human readable responses are better! Don't just provide something like "{ SV: 0, SP: 0, SH: 0.05, SM: 0 }" without explaining what it means.
+
+RESPONSE FORMAT (JSON only):
+{
+  "finalAnswer": "The actual answer to the user's question, a question for the user, or null if no answer",
+  "thinking": "Data source, tool calls, reasoning, or explanation of the answer",
+  "responseType": "answer|clarification|error|partial",
+  "issues": ["List any tool errors, SQL problems, or technical issues found"],
+  "hasValidAnswer": true/false
+}
+
+EXAMPLES:
+
+Example 1 - Good answer with data:
+"ANSWER: The maximum altitude was 150 meters. DATA SOURCE: Used queryData('SELECT MAX(Alt) FROM gps_0_data')"
+→ {"finalAnswer": "The maximum altitude was 150 meters", "thinking": "Data Source: Used queryData('SELECT MAX(Alt) FROM gps_0_data')", "responseType": "answer", "issues": [], "hasValidAnswer": true}
+
+Example 2 - Answer with tool error:
+"ANSWER: The maximum altitude was 150 meters. However, there was an error with the GPS query: table 'gps_data' not found. I used the available altitude data from the attitude logs instead."
+→ {"finalAnswer": "The maximum altitude was 150 meters", "thinking": "Used altitude data from attitude logs. GPS query failed due to table 'gps_data' not found.", "responseType": "partial", "issues": ["GPS table 'gps_data' not found"], "hasValidAnswer": true}
+
+Example 3 - Clarification request:
+"CLARIFICATION: What specific aspects of the flight data would you like me to analyze? REASON: Your question is too broad for me to provide a focused answer."
+→ {"finalAnswer": "What specific aspects of the flight data would you like me to analyze?", "thinking": "Reason: Your question is too broad for me to provide a focused answer.", "responseType": "clarification", "issues": [], "hasValidAnswer": false}
+
+Example 4 - Complete failure:
+"I encountered an error while processing your request. The database connection failed."
+→ {"finalAnswer": null, "thinking": "Database connection failed, unable to process request", "responseType": "error", "issues": ["Database connection failed"], "hasValidAnswer": false}
+
+!!!AGAIN, THIS IS IMPORTANT. IF YOU DON'T FIND AN ANSWER, ASK FOR CLARIFICATION!!!
+
+Parse the response above:`;
+
+            const completion = await this.openai.chat.completions.create({
+                model: "gpt-4o-mini", // Use cheaper model for parsing
+                messages: [
+                    {
+                        role: "system",
+                        content: "You are a precise response parser. Respond only with valid JSON matching the exact format specified."
+                    },
+                    {
+                        role: "user",
+                        content: parsingPrompt
+                    }
+                ],
+                max_tokens: 300,
+                temperature: 0.1
+            });
+
+            const parsedResult = JSON.parse(completion.choices[0].message.content);
+            
+            console.log('🔍 LLM parsing result:', parsedResult);
+            
+            // Validate the parsed result has required fields
+            if (!parsedResult.finalAnswer && !parsedResult.thinking) {
+                console.warn('⚠️ LLM parser returned incomplete result, falling back to regex');
+                return this.fallbackRegexParse(response);
+            }
+            
+            return {
+                finalAnswer: parsedResult.finalAnswer || 'No specific answer provided',
+                thinking: parsedResult.thinking || 'No reasoning provided',
+                responseType: parsedResult.responseType || 'unknown',
+                issues: parsedResult.issues || [],
+                hasValidAnswer: parsedResult.hasValidAnswer || false
+            };
+            
+        } catch (error) {
+            console.error('❌ Error with LLM parsing:', error);
+            console.log('🔄 Falling back to regex parsing...');
+            return this.fallbackRegexParse(response);
+        }
+    }
+
+    /**
+     * Fallback regex parsing method for when LLM parsing fails
+     * @param {string} response - The AI response text
+     * @returns {object} Parsed response with thinking and finalAnswer
+     */
+    fallbackRegexParse(response) {
+        try {
+            // Look for ANSWER: and DATA SOURCE: patterns
+            const answerMatch = response.match(/ANSWER:\s*(.*?)(?=\n|DATA SOURCE:|CLARIFICATION:|$)/s);
+            const dataSourceMatch = response.match(/DATA SOURCE:\s*(.*?)(?=\n|CLARIFICATION:|$)/s);
+            const clarificationMatch = response.match(/CLARIFICATION:\s*(.*?)(?=\n|REASON:|$)/s);
+            const reasonMatch = response.match(/REASON:\s*(.*?)(?=\n|$)/s);
+
+            if (answerMatch && dataSourceMatch) {
+                // This is an answer with data
+                const answer = answerMatch[1].trim();
+                const dataSource = dataSourceMatch[1].trim();
+                
+                return {
+                    finalAnswer: answer,
+                    thinking: `Data Source: ${dataSource}`,
+                    responseType: 'answer',
+                    issues: [],
+                    hasValidAnswer: true
+                };
+            } else if (clarificationMatch && reasonMatch) {
+                // This is a clarification request
+                const clarification = clarificationMatch[1].trim();
+                const reason = reasonMatch[1].trim();
+                
+                return {
+                    finalAnswer: clarification,
+                    thinking: `Reason: ${reason}`,
+                    responseType: 'clarification',
+                    issues: [],
+                    hasValidAnswer: false
+                };
+            } else if (clarificationMatch) {
+                // Just clarification without reason
+                const clarification = clarificationMatch[1].trim();
+                
+                return {
+                    finalAnswer: clarification,
+                    thinking: 'Clarification requested',
+                    responseType: 'clarification',
+                    issues: [],
+                    hasValidAnswer: false
+                };
+            } else {
+                // Fallback: treat entire response as answer
+                return {
+                    finalAnswer: response.trim(),
+                    thinking: null,
+                    responseType: 'fallback',
+                    issues: [],
+                    hasValidAnswer: true
+                };
+            }
+        } catch (error) {
+            console.error('❌ Error in fallback regex parsing:', error);
+            // Final fallback: return response as-is
+            return {
+                finalAnswer: response.trim(),
+                thinking: 'Parsing failed, showing full response',
+                responseType: 'error',
+                issues: ['Response parsing failed'],
+                hasValidAnswer: true
+            };
+        }
+    }
+
     async processMessage(userMessage, sessionId) {
         try {
             // Get session data
@@ -115,6 +288,9 @@ class ChatbotService {
             // Get AI response with tools
             const response = await this.getAIResponse(prompt, availableTools);
             
+            // Parse the AI response into structured format
+            const parsedResponse = await this.parseAIResponse(response);
+            
             // Validate the response by executing any mentioned queries
             console.log('🔍 Validating LLM response for query accuracy...');
             const validationResult = await this.queryValidator.validateResponse(response);
@@ -124,6 +300,7 @@ class ChatbotService {
             
             // Simple response handling - no second LLM validation
             let finalResponse = response;
+            let finalParsedResponse = parsedResponse;
             let correctiveFeedback = '';
             
             // Only handle query validation corrections (no answer quality validation)
@@ -147,6 +324,7 @@ ${correctiveFeedback}
                     console.log('🔄 Requesting correction from LLM...');
                     const correctedResponse = await this.getAIResponse(correctionPrompt, availableTools);
                     finalResponse = correctedResponse;
+                    finalParsedResponse = await this.parseAIResponse(correctedResponse);
                 }
             }
             
@@ -154,12 +332,13 @@ ${correctiveFeedback}
                 original: response.substring(0, 500) + '...',
                 final: finalResponse.substring(0, 500) + '...',
                 originalLength: response.length,
-                finalLength: finalResponse.length
+                finalLength: finalResponse.length,
+                parsed: finalParsedResponse
             });
             
             return {
-                response: finalResponse,
-                thinking: null, // No more reasoning parsing
+                response: finalParsedResponse.finalAnswer,
+                thinking: finalParsedResponse.thinking,
                 relevantDocs: relevantDocs.map(doc => ({
                     content: doc.content.substring(0, 200) + '...',
                     similarity: doc.similarity.toFixed(3)
@@ -644,7 +823,7 @@ EXAMPLE USAGE:
         const messages = [
             {
                 role: "system",
-                content: "You are an expert UAV telemetry analyst. Use the tool results to provide accurate answers."
+                content: "You are an expert UAV telemetry analyst. Use the tool results to provide accurate answers. Remember to format your response with ANSWER: and DATA SOURCE: sections as specified in the original prompt."
             },
             {
                 role: "user",
@@ -661,7 +840,11 @@ EXAMPLE USAGE:
             temperature: 0.7
         });
         
-        return finalResponse.choices[0].message.content;
+        // Parse the final response to ensure consistent formatting
+        const parsedResponse = await this.parseAIResponse(finalResponse.choices[0].message.content);
+        
+        // Return the parsed final answer
+        return parsedResponse.finalAnswer;
     }
 }
 
